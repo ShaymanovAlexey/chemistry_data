@@ -24,10 +24,7 @@ from scipy.sparse import hstack
 from sklearn.pipeline import  FeatureUnion
 from matplotlib.pyplot import  colormaps as cm
 from collections import Counter
-from sklearn.feature_extraction.text import HashingVectorizer,TfidfVectorizer, CountVectorizer
-from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics import confusion_matrix
-import spacy
 from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import PolynomialFeatures
@@ -119,23 +116,96 @@ fn = "input/train/{}/geometry.xyz".format(idx)
 train_xyz, train_lat = get_xyz_data(fn)
 
 
-
-def runLinRegres(train_X, train_y, test_X, test_y, test_X2, polyn=True):
+def run_model(model,train_X, train_y, test_X, test_y, test_X2, polyn):
     if polyn:
-        model = make_pipeline(PolynomialFeatures(2),linear_model.ElasticNetCV(l1_ratio=0.1, eps=0.001))
+        model = make_pipeline(PolynomialFeatures(2),model)
     else:
-        model = linear_model.ElasticNetCV(l1_ratio=0.3, eps=0.00002)
+        model = model
     model.fit(train_X, train_y)
     pred_test_y = model.predict(test_X)
     pred_test_y2 = model.predict(test_X2)
     return pred_test_y, pred_test_y2, model
 
-def runRandomForest(train_X, train_y, test_X, test_y, test_X2):
-    model = ensemble.RandomForestRegressor(n_estimators=300)
-    model.fit(train_X, train_y)
-    pred_test_y = model.predict(test_X)
-    pred_test_y2 = model.predict(test_X2)
-    return pred_test_y, pred_test_y2, model
+def runXGB(train_X, train_y, test_X, test_y=None, test_X2=None, seed_val=23, child=3, colsample=0.7,params={}):
+    param = {}
+    param['eta'] = 0.06
+    param['objective'] = 'reg:linear'
+    param['max_depth'] = 4
+    param['silent'] = 1
+    param['eval_metric'] = "rmse"
+    param['min_child_weight'] = child
+    param['subsample'] = 0.8
+    param['colsample_bytree'] = colsample
+    param['seed'] = seed_val
+    num_rounds = 2000
+    col = ['formation_energy_ev_natom', 'bandgap_energy_ev']
+
+    plst = list(param.items()) + list(params.items())
+    xgtrain1 = xgb.DMatrix(train_X,train_y[col[0]])
+    xgtrain2 = xgb.DMatrix(train_X, train_y[col[1]])
+
+    if test_y is not None:
+        xgtest1 = xgb.DMatrix(test_X, test_y[col[0]])
+        xgtest2 = xgb.DMatrix(test_X, test_y[col[1]])
+        watchlist = [(xgtrain1,'train'), (xgtest1, 'test')]
+        model1 = xgb.train(plst, xgtrain1, num_rounds, watchlist, early_stopping_rounds=50, verbose_eval=40)
+        model2 = xgb.train(plst, xgtrain2, num_rounds, watchlist, early_stopping_rounds=50, verbose_eval=40)
+    else:
+        xgtest = xgb.DMatrix(test_X)
+        model = xgb.train(plst, xgtrain1, num_rounds)
+
+    pred_test_y1 = model1.predict(xgtest1, ntree_limit = model1.best_ntree_limit)
+    pred_test_y2 = model2.predict(xgtest2, ntree_limit=model2.best_ntree_limit)
+
+    if test_X2 is not None:
+        xgtest3 = xgb.DMatrix(test_X2)
+        pred_test_y3 = model1.predict(xgtest3, ntree_limit = model1.best_ntree_limit)
+        pred_test_y4 = model2.predict(xgtest3, ntree_limit = model2.best_ntree_limit)
+
+    pred_train = np.zeros([test_X.shape[0], 2])
+    pred_train[:,0] = pred_test_y1
+    pred_train[:,1] = pred_test_y2
+    pred_test = np.zeros([test_X2.shape[0], 2])
+
+    if test_X2 is not None:
+        pred_test[:,0] = pred_test_y3
+        pred_test[:,1] = pred_test_y4
+    return pred_train, pred_test, model1
+
+
+def run_estimator(k_enum,run_for_model,train_X, train_y, test_X, pol=False):
+    k_data = train_y.shape[1]
+    cv_scores = []
+    pred_full_test = 0
+    if k_data==1:
+        pred_train = np.zeros([df_train.shape[0]])
+    else:
+        pred_train = np.zeros([df_train.shape[0],k_data])
+    params_data = {}
+
+    kf = model_selection.KFold(n_splits=k_enum, shuffle=True, random_state=4)
+    cv_score = []
+    pred_full_test = 0
+
+    for dev_index, val_index in kf.split(train_X):
+        dev_X, val_X = train_X.loc[dev_index], train_X.loc[val_index]
+        dev_y, val_y = train_y.loc[dev_index], train_y.loc[val_index]
+        if run_for_model== runXGB:
+            print("runXGB")
+            pred_val_y, pred_test_y, model1= runXGB(dev_X, dev_y, val_X, val_y, test_X, seed_val=0)
+        else:
+            pred_val_y, pred_test_y, model = run_model(run_for_model,dev_X, dev_y, val_X, val_y, test_X,pol)
+        pred_full_test = pred_full_test + pred_test_y
+        pred_train[val_index] = pred_val_y
+        print(rmsle(val_y, pred_val_y))
+        #cv_scores.append(metrics.mean_squared_log_error(val_y, pred_val_y))
+    #print(np.mean(cv_scores))
+    pred_full_test = pred_full_test / float(k_enum)
+    # pred_full_test[pred_full_test <= 0] = 1e-6
+    pred_train = pred_train / float(k_enum)
+    print(pred_full_test)
+    return pred_train,pred_full_test
+
 
 # colormap = plt.cm.viridis
 # figure1 = plt.figure(figsize=(19,17))
@@ -150,43 +220,95 @@ def runRandomForest(train_X, train_y, test_X, test_y, test_X2):
 # plt.show()
 
 
+cols_to_drop = ['id','formation_energy_ev_natom','bandgap_energy_ev']
+params = None
+train_X = df_train.drop(cols_to_drop, axis=1)
+test_X = df_test.drop(['id'], axis=1)
 
-def runXGB(train_X, train_y, test_X, test_y=None, test_X2=None, seed_val=23, child=3, colsample=0.7,params={}):
-    param = {}
-    param['eta'] = 0.15
-    param['objective'] = 'reg:linear'
-    param['max_depth'] = 6
-    param['silent'] = 1
-    param['eval_metric'] = "rmse"
-    param['min_child_weight'] = child
-    param['subsample'] = 0.6
-    param['colsample_bytree'] = colsample
-    param['seed'] = seed_val
-    num_rounds = 2000
+col = ['formation_energy_ev_natom','bandgap_energy_ev']
+#col = ['bandgap_energy_ev']
+train_y = df_train[col]
+k_enum=7
+print("XGB")
 
-    plst = list(param.items()) + list(params.items())
-    xgtrain = xgb.DMatrix(train_X, train_y)
+xgb_train,xgb_test = run_estimator(k_enum,runXGB,train_X, train_y, test_X)
 
-    if test_y is not None:
-        xgtest = xgb.DMatrix(test_X, test_y)
-        watchlist = [ (xgtrain,'train'), (xgtest, 'test')]
-        model = xgb.train(plst, xgtrain, num_rounds, watchlist, early_stopping_rounds=50, verbose_eval=40)
-    else:
-        xgtest = xgb.DMatrix(test_X)
-        model = xgb.train(plst, xgtrain, num_rounds)
+train_X['xgb_form'] = xgb_train[:,0]*6.0
+test_X['xgb_form'] = xgb_test[:,0]*6.0
+# df_train['lin_test_band'] = pd_train[1]
 
-    pred_test_y = model.predict(xgtest, ntree_limit = model.best_ntree_limit)
-    if test_X2 is not None:
-        xgtest2 = xgb.DMatrix(test_X2)
-        pred_test_y2 = model.predict(xgtest2, ntree_limit = model.best_ntree_limit)
-    return pred_test_y, pred_test_y2, model
+print("RandomForest")
+r_tree_train,r_tree_test=run_estimator(k_enum,ensemble.RandomForestRegressor(n_estimators=300),train_X, train_y, test_X)
+
+train_X['r_tree_form'] = r_tree_train[:,0]
+train_X['r_tree_band'] = r_tree_train[:,1]
+test_X['r_tree_form'] = r_tree_test[:,0]
+test_X['r_tree_band'] = r_tree_test[:,1]
+
+# print("ExtraTreeRegressor")
+# e_tree_train,e_tree_test  = run_estimator(k_enum,ensemble.ExtraTreesRegressor(n_estimators=500),train_X, train_y, test_X)
+#
+# train_X['e_tree_form'] = e_tree_train[:,0]
+# train_X['e_tree_band'] = e_tree_train[:,1]
+# test_X['e_tree_form'] = e_tree_test[:,0]
+# test_X['e_tree_band'] = e_tree_test[:,1]
+
+
+# print("ExtraTreeRegressor")
+# f_tree_train,f_tree_test  = run_estimator(k_enum,ensemble.ExtraTreesRegressor(n_estimators=200),train_X, train_y, test_X, test_y=None, test_X2=None)
+
+test_out = pd.DataFrame()
+test_out['id'] = df_test['id']
+test_out['formation_energy_ev_natom'] = train_X['xgb_form']
+test_out['bandgap_energy_ev'] = test_X['r_tree_band']
+
+print(test_out[test_out['bandgap_energy_ev']<0]['bandgap_energy_ev'])
+#test_out['formation_energy_ev_natom'] = test_out['formation_energy_ev_natom'].apply(lambda x:abs(x))
+print(test_out[test_out['formation_energy_ev_natom']<0]['formation_energy_ev_natom'])
+test_out.to_csv('sub.csv',index=False)
+#
+# print("LinRegressor")
+# run_estimator(k_enum,linear_model.LinearRegression(),train_X, train_y, test_X, test_y=None, test_X2=None)
+
+#print("ElasticNetCV")
+#run_estimator(k_enum,linear_model.MultiTaskElasticNetCV(l1_ratio=0.01, eps=0.0001),train_X, train_y, test_X, test_y=None, test_X2=None)
+
+
+
+# print("ExtraTreeRegressor")
+# run_estimator(k_enum,ensemble.ExtraTreesRegressor(n_estimators=500),train_X, train_y, test_X, test_y=None, test_X2=None)
+
+sys.exit()
+# pd_train = pd.DataFrame(pred_train)
+# df_train['lin_test_form'] = pd_train[0]
+# df_train['lin_test_band'] = pd_train[1]
+
+# y_pred = pred_full_test/6.0
+# y_pred[y_pred <= 0] = 1e-6
+# df_test['lin_test_form'] = y_pred[:,0]/6.0
+# df_test['lin_test_band'] = y_pred[:,1]/6.0
+
+
+test_out = pd.DataFrame()
+test_out['id'] = df_test['id']
+#test_out['formation_energy_ev_natom'] = pred_full_test[:,0]/6.0
+test_out['bandgap_energy_ev'] = pred_full_test[:,1]/6.0
+
+# pd_train = pd.DataFrame(pred_train)
+# df_train['lin_test_form'] = pd_train[0]
+# df_train['lin_test_band'] = pd_train[1]
+#
+# y_pred = pred_full_test/6.0
+# y_pred[y_pred <= 0] = 1e-6
+# df_test['lin_test_form'] = y_pred[:,0]/6.0
+# df_test['lin_test_band'] = y_pred[:,1]/6.0
 
 cols_to_drop = ['id','formation_energy_ev_natom','bandgap_energy_ev']
 
 train_X = df_train.drop(cols_to_drop, axis=1)
 test_X = df_test.drop(['id'], axis=1)
 
-kf = model_selection.KFold(n_splits=6, shuffle=True, random_state=4)
+
 cv_scores = []
 pred_full_test = 0
 pred_train = np.zeros([df_train.shape[0],2])
@@ -196,10 +318,15 @@ target1 = 'formation_energy_ev_natom'
 target2 = 'bandgap_energy_ev'
 train_y = df_train[col]
 
+kf = model_selection.KFold(n_splits=6, shuffle=True, random_state=4)
+cv_score = []
+pred_test_full = 0
+
 for dev_index, val_index in kf.split(train_X):
     dev_X, val_X = train_X.loc[dev_index], train_X.loc[val_index]
     dev_y, val_y = train_y.loc[dev_index], train_y.loc[val_index]
-    pred_val_y, pred_test_y, model = runXGB(dev_X, dev_y, val_X, val_y, test_X, seed_val=0)
+    pred_val_y, pred_test_y, model1, model2 = runXGB(dev_X, dev_y, val_X, val_y, test_X, seed_val=0)
+    # pred_val_y, pred_test_y, model = runLinRegres(dev_X, dev_y, val_X, val_y, test_X)
     # pred_val_y, pred_test_y, model = runRandomForest(dev_X, dev_y, val_X, val_y, test_X)
     #pred_val_y, pred_test_y, model = runLinRegres(dev_X, dev_y, val_X, val_y, test_X,polyn=False)
     pred_full_test = pred_full_test + pred_test_y
@@ -207,33 +334,37 @@ for dev_index, val_index in kf.split(train_X):
     print(rmsle(val_y, pred_val_y))
     cv_scores.append(metrics.mean_squared_log_error(val_y, pred_val_y))
 
-pd_train = pd.DataFrame(pred_train)
 
-print(pd_train[0], train_y)
-
-plt.scatter(x = pd_train[0],y = train_y['formation_energy_ev_natom'])
-plt.xlabel('predict_form', fontsize=12)
-plt.ylabel('real_form', fontsize=12)
-plt.show()
+test_out['formation_energy_ev_natom'] = pred_full_test[:,0]/6.0
 
 
-df_test['lin_test_form'] = pred_full_test[:,0]/6.0
-df_test['lin_test_band'] = pred_full_test[:,1]/6.0
-print(df_test['lin_test_form'])
 
-test_out = pd.DataFrame()
-test_out['id'] = df_test['id']
-test_out['formation_energy_ev_natom'] = df_test['lin_test_form']
-test_out['bandgap_energy_ev'] = df_test['lin_test_band']
+# print(cv_scores)
+# print(pd_train[0], train_y)
+#
+# plt.scatter(x = pd_train[0],y = train_y['formation_energy_ev_natom'])
+# plt.xlabel('predict_form', fontsize=12)
+# plt.ylabel('real_form', fontsize=12)
+# plt.show()
 
-plt.scatter(x = pd_train[1],y = train_y['bandgap_energy_ev'])
-plt.xlabel('predict_form', fontsize=12)
-plt.ylabel('real_form', fontsize=12)
-plt.show()
 
-print(test_out[test_out['bandgap_energy_ev']<0]['bandgap_energy_ev'])
+# df_test['lin_test_form'] = pred_full_test[:,0]/6.0
+# df_test['lin_test_band'] = pred_full_test[:,1]/6.0
+# print(df_test['lin_test_form'])
+
+
+
+#test_out.to_csv('sub.csv',index=False,float_format='%.4f')
+print(test_out)
+# plt.scatter(x = pd_train[1],y = train_y['bandgap_energy_ev'])
+# plt.xlabel('predict_form', fontsize=12)
+# plt.ylabel('real_form', fontsize=12)
+# plt.show()
+test_out.to_csv('sub.csv',index=False,float_format='%.4f',columns=['id','formation_energy_ev_natom','bandgap_energy_ev'])
+sys.exit()
+#print(test_out[test_out['bandgap_energy_ev']<0]['bandgap_energy_ev'])
 #test_out['formation_energy_ev_natom'] = test_out['formation_energy_ev_natom'].apply(lambda x:abs(x))
-print(test_out[test_out['formation_energy_ev_natom']<0]['formation_energy_ev_natom'])
+#print(test_out[test_out['formation_energy_ev_natom']<0]['formation_energy_ev_natom'])
 test_out.to_csv('sub.csv',index=False,float_format='%.4f')
 
 sys.exit()
