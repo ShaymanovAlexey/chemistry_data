@@ -29,7 +29,13 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.preprocessing import FunctionTransformer
+import lightgbm as lgbm
 from pandas.tools.plotting import table
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn import naive_bayes,neighbors
+from sklearn import tree
+from catboost import CatBoostRegressor
+
 
 transformer_exp = FunctionTransformer(np.exp)
 
@@ -78,26 +84,19 @@ df_sample = pd.read_csv("input/sample_submission.csv")
 #
 # plt.show()
 
+def visualize_bad_occurance(name_pred,y_name,frac_not_fall,list_of_columns):
+    train_X["subst_temp"] = train_st_form[name_pred] - train_y[y_name]
+    train_X["subst_temp"] = train_X["subst_temp"].apply(lambda x: abs(x))
 
 
-# df_train.formation_energy_ev_natom = df_train.formation_energy_ev_natom.round(2)
-# df_train.bandgap_energy_ev = df_train.bandgap_energy_ev.round(1)
-# cnt_srs_train = df_train['formation_energy_ev_natom'].value_counts()
-# #cnt_srs_test = df_test['number_of_total_atoms'].value_counts()
-# #
-# plt.figure()
-# sns.barplot(cnt_srs_train.index, cnt_srs_train.values, alpha=0.9, color='b')
-# #sns.barplot(cnt_srs_test.index, cnt_srs_test.values, alpha=0.8,color='g')
-# plt.ylabel('Number of Occurrences', fontsize=12)
-# plt.xlabel('formation_energy_ev_natom', fontsize=12)
-# plt.show()
-#
-
-
-
-#
-# plt.scatter(x = df_train['number_of_total_atoms'],y = df_train['formation_energy_ev_natom'])
-# plt.show()
+    for data in list_of_columns:
+        temp_train = train_X[train_X["subst_temp"] > frac_not_fall * train_y[y_name]][data].value_counts()
+        plt.figure()
+        sns.barplot(temp_train.index, temp_train.values, alpha=0.8, color='g')
+        plt.ylabel('Number of Occurrences', fontsize=12)
+        plt.xlabel("Date:{0} for {1}".format(data,name_pred), fontsize=12)
+        plt.show()
+    del train_X["subst_temp"]
 
 def get_xyz_data(filename):
     pos_data = []
@@ -111,9 +110,37 @@ def get_xyz_data(filename):
                 lat_data.append(np.array(x[1:4], dtype=np.float))
     return pos_data, np.array(lat_data)
 
-idx = df_train.id.values[2]
+idx = df_train.id.values[0]
 fn = "input/train/{}/geometry.xyz".format(idx)
 train_xyz, train_lat = get_xyz_data(fn)
+
+def length(v):
+    return np.linalg.norm(v)
+
+def unit_vector(vector):
+    return vector / length(vector)
+
+def angle_between(v1, v2):
+    v1_u = unit_vector(v1)
+    v2_u = unit_vector(v2)
+    return np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0, 1.0))
+
+def angle_deg_between(v1, v2):
+    return np.degrees(angle_between(v1, v2))
+
+def get_lattice_constants(lattice_vectors):
+    lat_const_series = pd.Series()
+    for i in range(3):
+        str_name = "lattice_vector_"+str(i+1)+"_ang"
+        lat_const_series[str_name] = length(lattice_vectors[i])
+
+    lat_const_series["lattice_angle_alpha_degree"] = angle_deg_between(lattice_vectors[1],lattice_vectors[2])
+    lat_const_series["lattice_angle_beta_degree"] = angle_deg_between(lattice_vectors[2],lattice_vectors[0])
+    lat_const_series["lattice_angle_gamma_degree"] = angle_deg_between(lattice_vectors[0],lattice_vectors[1])
+    return lat_const_series
+
+print(get_lattice_constants(train_lat))
+
 
 
 def run_model(model,train_X, train_y, test_X, test_y, test_X2, polyn):
@@ -126,85 +153,175 @@ def run_model(model,train_X, train_y, test_X, test_y, test_X2, polyn):
     pred_test_y2 = model.predict(test_X2)
     return pred_test_y, pred_test_y2, model
 
-def runXGB(train_X, train_y, test_X, test_y=None, test_X2=None, seed_val=23, child=3, colsample=0.7,params={}):
+def runXGB(train_X, train_y, test_X, test_y=None, test_X2=None, seed_val=23, child=3,params={}):
     param = {}
-    param['eta'] = 0.06
+    param['eta'] = 0.036
     param['objective'] = 'reg:linear'
     param['max_depth'] = 4
     param['silent'] = 1
     param['eval_metric'] = "rmse"
     param['min_child_weight'] = child
-    param['subsample'] = 0.8
-    param['colsample_bytree'] = colsample
+    param['subsample'] = 0.79
+    param['colsample_bytree'] = 0.7
     param['seed'] = seed_val
     num_rounds = 2000
-    col = ['formation_energy_ev_natom', 'bandgap_energy_ev']
+    #col = ['formation_energy_ev_natom', 'bandgap_energy_ev']
 
     plst = list(param.items()) + list(params.items())
-    xgtrain1 = xgb.DMatrix(train_X,train_y[col[0]])
-    xgtrain2 = xgb.DMatrix(train_X, train_y[col[1]])
+    xgtrain = xgb.DMatrix(train_X,train_y)
 
     if test_y is not None:
-        xgtest1 = xgb.DMatrix(test_X, test_y[col[0]])
-        xgtest2 = xgb.DMatrix(test_X, test_y[col[1]])
-        watchlist = [(xgtrain1,'train'), (xgtest1, 'test')]
-        model1 = xgb.train(plst, xgtrain1, num_rounds, watchlist, early_stopping_rounds=50, verbose_eval=40)
-        model2 = xgb.train(plst, xgtrain2, num_rounds, watchlist, early_stopping_rounds=50, verbose_eval=40)
+        xgtest = xgb.DMatrix(test_X, test_y)
+        watchlist = [(xgtrain,'train'), (xgtest, 'test')]
+        model = xgb.train(plst, xgtrain, num_rounds, watchlist, early_stopping_rounds=150, verbose_eval=2000)
     else:
         xgtest = xgb.DMatrix(test_X)
-        model = xgb.train(plst, xgtrain1, num_rounds)
+        model = xgb.train(plst, xgtrain, num_rounds)
 
-    pred_test_y1 = model1.predict(xgtest1, ntree_limit = model1.best_ntree_limit)
-    pred_test_y2 = model2.predict(xgtest2, ntree_limit=model2.best_ntree_limit)
-
-    if test_X2 is not None:
-        xgtest3 = xgb.DMatrix(test_X2)
-        pred_test_y3 = model1.predict(xgtest3, ntree_limit = model1.best_ntree_limit)
-        pred_test_y4 = model2.predict(xgtest3, ntree_limit = model2.best_ntree_limit)
-
-    pred_train = np.zeros([test_X.shape[0], 2])
-    pred_train[:,0] = pred_test_y1
-    pred_train[:,1] = pred_test_y2
-    pred_test = np.zeros([test_X2.shape[0], 2])
+    pred_test_y1 = model.predict(xgtest, ntree_limit = model.best_ntree_limit)
 
     if test_X2 is not None:
-        pred_test[:,0] = pred_test_y3
-        pred_test[:,1] = pred_test_y4
-    return pred_train, pred_test, model1
+        xgtest2 = xgb.DMatrix(test_X2)
+        pred_test_y2 = model.predict(xgtest2, ntree_limit = model.best_ntree_limit)
+
+    pred_train = np.zeros([test_X.shape[0]])
+    pred_train = pred_test_y1
+    pred_test = np.zeros([test_X2.shape[0]])
+
+    if test_X2 is not None:
+        pred_test = pred_test_y2
+    return pred_train, pred_test, model
+
+def runLGBM(train_X, train_y, test_X, test_y=None, test_X2=None, seed_val=23, child=3):
+    RS = 20170501
+    np.random.seed(RS)
+
+    ROUNDS = 500
+
+    params = {
+        'objective': 'regression_l2',
+        'metric': 'rmse',
+        'boosting': 'gbdt',
+        'learning_rate': 0.03,
+        'verbose': 0,
+        'num_leaves': 2 ** 5,
+        'bagging_fraction': 0.95,
+        'bagging_freq': 3,
+        'bagging_seed': RS,
+        'feature_fraction': 0.7,
+        'feature_fraction_seed': RS,
+        'max_bin': 100,
+        'max_depth': 3,
+        'num_rounds': ROUNDS
+    }
+
+    train_lgb = lgbm.Dataset(train_X, train_y)
 
 
-def run_estimator(k_enum,run_for_model,train_X, train_y, test_X, pol=False):
-    k_data = train_y.shape[1]
-    cv_scores = []
+    test_lgbm = test_X
+    model = lgbm.train(params, train_lgb, num_boost_round=ROUNDS)
+
+    pred_test_y1 = model.predict(test_lgbm)
+
+    if test_X2 is not None:
+        test_lgbm2 = test_X2
+        pred_test_y2 = model.predict(test_lgbm2)
+
+    pred_train = np.zeros([test_X.shape[0]])
+    pred_train = pred_test_y1
+    pred_test = np.zeros([test_X2.shape[0]])
+
+    if test_X2 is not None:
+        pred_test = pred_test_y2
+    return pred_train, pred_test, model
+
+def run_estimator(k_enum,run_for_model,train_X, train_y, test_X, pol=False,single=False,params_xgb={}):
+    rmsle_data = []
     pred_full_test = 0
-    if k_data==1:
-        pred_train = np.zeros([df_train.shape[0]])
+    if single:
+        pred_train = np.zeros([train_X.shape[0]])
     else:
-        pred_train = np.zeros([df_train.shape[0],k_data])
+        k_data = train_y.shape[1]
+        pred_train = np.zeros([train_X.shape[0],k_data])
     params_data = {}
-
     kf = model_selection.KFold(n_splits=k_enum, shuffle=True, random_state=4)
     cv_score = []
     pred_full_test = 0
 
     for dev_index, val_index in kf.split(train_X):
-        dev_X, val_X = train_X.loc[dev_index], train_X.loc[val_index]
-        dev_y, val_y = train_y.loc[dev_index], train_y.loc[val_index]
+        dev_X, val_X = train_X.iloc[dev_index], train_X.iloc[val_index]
+        dev_y, val_y = train_y.iloc[dev_index], train_y.iloc[val_index]
         if run_for_model== runXGB:
             print("runXGB")
-            pred_val_y, pred_test_y, model1= runXGB(dev_X, dev_y, val_X, val_y, test_X, seed_val=0)
+            pred_val_y, pred_test_y, model1= runXGB(dev_X, dev_y, val_X, val_y, test_X, seed_val=0,params=params_xgb)
+        elif run_for_model==runLGBM:
+            print("runLGBM")
+            pred_val_y, pred_test_y, model1 = runLGBM(dev_X, dev_y, val_X, val_y, test_X, seed_val=0)
         else:
             pred_val_y, pred_test_y, model = run_model(run_for_model,dev_X, dev_y, val_X, val_y, test_X,pol)
         pred_full_test = pred_full_test + pred_test_y
         pred_train[val_index] = pred_val_y
-        print(rmsle(val_y, pred_val_y))
+        # print("rmsle",rmsle(val_y, pred_val_y))
+        rmsle_data.append(rmsle(val_y, pred_val_y))
         #cv_scores.append(metrics.mean_squared_log_error(val_y, pred_val_y))
-    #print(np.mean(cv_scores))
+
     pred_full_test = pred_full_test / float(k_enum)
     # pred_full_test[pred_full_test <= 0] = 1e-6
-    pred_train = pred_train / float(k_enum)
-    print(pred_full_test)
     return pred_train,pred_full_test
+
+def run_m_classes(k_enum, clrf_list, clr_names, train_X, train_y, test_X):
+    for clr, name in zip(clrf_list, clr_names):
+        scores = model_selection.cross_val_score(clr,train_X,train_y, cv = k_enum)
+        y_pred = model_selection.cross_val_predict(clr,train_X,train_y,cv = k_enum)
+        print(rmsle(y_pred,train_y))
+        print("Accuracy: %0.2f +/- %0.2f (%s 95%% CI)" % (scores.mean(), scores.std() * 2, name))
+
+#-----------------------------------------round band gap for classification task ------------------------------------------------------------------
+# df_train.formation_energy_ev_natom = df_train.formation_energy_ev_natom.round(2)
+df_round_band_gap = df_train.copy()
+df_round_band_gap['round_band_gap'] = df_train.bandgap_energy_ev.round(0)
+# df_round_band_gap['round_band_gap'] = df_round_band_gap['round_band_gap'].apply(lambda x:int(x))
+cnt_srs_train = df_round_band_gap['round_band_gap'].value_counts()
+df_y = df_round_band_gap['round_band_gap']
+df_round_band_gap = df_round_band_gap.drop(['id','formation_energy_ev_natom','round_band_gap','bandgap_energy_ev'], axis=1)
+
+df_test_round_band_gap = df_test.copy()
+df_test_round_band_gap = df_test_round_band_gap.drop('id', axis =1)
+# cnt_srs_test = df_test['number_of_total_atoms'].value_counts()
+#
+# plt.figure()
+# sns.barplot(cnt_srs_train.index, cnt_srs_train.values, alpha=0.9, color='b')
+# #sns.barplot(cnt_srs_test.index, cnt_srs_test.values, alpha=0.8,color='g')
+# plt.ylabel('Number of Occurrences', fontsize=12)
+# plt.xlabel('round_band_gap', fontsize=12)
+# plt.show()
+
+train_st_form = pd.DataFrame()
+test_st_form = pd.DataFrame()
+
+train_st_band = pd.DataFrame()
+test_st_band = pd.DataFrame()
+
+
+# k_enum = 5
+# clf1 = ensemble.AdaBoostClassifier()
+# clf2 = ensemble.RandomForestClassifier(n_estimators=350,random_state=1)
+# clf3 = naive_bayes.GaussianNB()
+# clf4 = neighbors.KNeighborsClassifier()
+# clf5 = tree.DecisionTreeClassifier()
+# clf6 = ensemble.GradientBoostingClassifier(n_estimators=300,random_state=201)
+# clf7 = svm.NuSVR(C=6)
+# clrf_list = [clf1,clf2,clf3,clf4,clf5,clf6,clf7]
+# clr_names = ['AdaBoostClassifier','RandomForestClassifier','GaussianNB','KNeighborsClassifier','DecisionTreeClassifier','GradientBoostingClassifier','NuSVR']
+# run_m_classes(k_enum, clrf_list, clr_names, df_round_band_gap, df_y, df_test_round_band_gap)
+#
+# eclf = VotingClassifier(estimators=[('cl1', clf1),('cl2', clf2),('cl3',clf3),('cl4', clf4), ('cl5', clf5),('cl6',clf6)], voting='soft', weights=[1,2,1,2,1,3], flatten_transform=True)
+# clr_train,clr_test = run_estimator(k_enum,eclf,df_round_band_gap, df_y, df_test_round_band_gap,False,True)
+# print(metrics.accuracy_score(clr_train,df_y))
+#
+# #---------------------------------------------------------------------------------------------------------------------------------------------------
+# train_st_band["round_band"] = clr_train
+# test_st_band["round_band"] = clr_test
 
 
 # colormap = plt.cm.viridis
@@ -212,60 +329,262 @@ def run_estimator(k_enum,run_for_model,train_X, train_y, test_X, pol=False):
 # plt.title('Corr between data', y=1, size=7)
 # sns.heatmap(df_train.astype(float).corr(),linewidths=0.01,vmax=1.0, square=True, cmap=colormap, linecolor='white', annot=True)
 # plt.show()
-#
-# colormap = plt.cm.viridis
-# figure2 = plt.figure(figsize=(19,17))
-# plt.title('Corr between data', y=1, size=7)
-# sns.heatmap(df_test.astype(float).corr(),linewidths=0.01,vmax=1.0, square=True, cmap=colormap, linecolor='white', annot=True)
-# plt.show()
+
 
 
 cols_to_drop = ['id','formation_energy_ev_natom','bandgap_energy_ev']
 params = None
+col = ['formation_energy_ev_natom','bandgap_energy_ev']
 train_X = df_train.drop(cols_to_drop, axis=1)
 test_X = df_test.drop(['id'], axis=1)
+test_X_good = df_test[df_test.spacegroup != 12]
+test_X_good = test_X_good.drop(['id'], axis=1)
+train_X_good = df_train[df_train.spacegroup != 12]
+train_y_good = train_X_good[col]
+train_X_good = train_X_good.drop(cols_to_drop, axis=1)
 
-col = ['formation_energy_ev_natom','bandgap_energy_ev']
+# print(pd.isnull(train_y_good).any(1).nonzero())
 #col = ['bandgap_energy_ev']
 train_y = df_train[col]
 k_enum=7
-print("XGB")
+list_of_columns = ['spacegroup',
+                   'number_of_total_atoms',
+                   'percent_atom_al',
+                   'percent_atom_ga',
+                   'percent_atom_in']
+print("CatBoost")
 
-xgb_train,xgb_test = run_estimator(k_enum,runXGB,train_X, train_y, test_X)
+cat_form_train3,cat_form_test3 = run_estimator(k_enum,CatBoostRegressor(random_seed=10,iterations=1000,depth=2, l2_leaf_reg=3,learning_rate=0.11, loss_function='RMSE',feature_border_type='MinEntropy'),train_X, train_y['formation_energy_ev_natom'], test_X,False,True)
+cat_band_train3,cat_band_test3 = run_estimator(k_enum,CatBoostRegressor(random_seed=10,iterations=500,depth=6, l2_leaf_reg=3, learning_rate=0.06, loss_function='MAE'),train_X, train_y['bandgap_energy_ev'], test_X,False,True)
 
-train_X['xgb_form'] = xgb_train[:,0]*6.0
-test_X['xgb_form'] = xgb_test[:,0]*6.0
-# df_train['lin_test_band'] = pd_train[1]
+train_st_form['cat_form2'] = cat_form_train3
+train_st_band['cat_band2'] = cat_band_train3
+test_st_form['cat_form2'] = cat_form_test3
+test_st_band['cat_band2'] = cat_band_test3
+print("cat form ",rmsle(cat_form_train3,train_y['formation_energy_ev_natom']))
+print("cat  band ",rmsle(cat_band_train3,train_y['bandgap_energy_ev']))
+
+list_of_columns = ['spacegroup',
+                   'number_of_total_atoms',
+                   'percent_atom_al',
+                   'percent_atom_ga',
+                   'percent_atom_in']
+
+# visualize_bad_occurance('cat_form2','formation_energy_ev_natom',1/3,list_of_columns)
+
+print("nuSVR")
+nus_form_train3,nus_form_test3 = run_estimator(k_enum,svm.NuSVR(C=3),train_X, train_y['formation_energy_ev_natom'], test_X,False,True)
+nus_band_train3,nus_band_test3 = run_estimator(k_enum,svm.NuSVR(C=100),train_X, train_y['bandgap_energy_ev'], test_X,False,True)
+
+train_st_form['nuSVR_form2'] = nus_form_train3
+train_st_band['nuSVR_band2'] = nus_band_train3
+test_st_form['nuSVR_form2'] = nus_form_test3
+test_st_band['nuSVR_band2'] = nus_band_test3
+print("nuSVR form ",rmsle(nus_form_train3,train_y['formation_energy_ev_natom']))
+print("nuSVR band ",rmsle(nus_band_train3,train_y['bandgap_energy_ev']))
+
+# visualize_bad_occurance('nuSVR_form2','formation_energy_ev_natom',1/3,list_of_columns)
+
+# subPd = pd.DataFrame(nus_form_train3,train_y['formation_energy_ev_natom'])
+# print(subPd[abs(subPd['formation_energy_ev_natom']- subPd[0])>1/3*subPd['formation_energy_ev_natom']])
+# plt.scatter(nus_form_train3,train_y['formation_energy_ev_natom'])
+# plt.xlabel('predict data')
+# plt.ylabel('true data')
+# plt.show()
+
+print("Knn")
+
+knn_train,knn_test = run_estimator(k_enum,neighbors.KNeighborsRegressor(),train_X, train_y, test_X,False)
+
+train_st_form['knn_form'] = knn_train[:,0]
+train_st_band['knn_band'] = knn_train[:,1]
+test_st_form['knn_form'] = knn_test[:,0]
+test_st_band['knn_band'] = knn_test[:,1]
+print("knn form ",rmsle(knn_train[:,0],train_y['formation_energy_ev_natom']))
+print("knn band ",rmsle(knn_train[:,1],train_y['bandgap_energy_ev']))
+
+# visualize_bad_occurance('knn_form','formation_energy_ev_natom',1/3,list_of_columns)
+#
+#
+# print("LinReg")
+# lin_train,lin_test = run_estimator(k_enum,linear_model.LinearRegression(),train_X, train_y, test_X,True)
+#
+# train_st_form['lin_form'] = lin_train[:,0]
+# train_st_band['lin_band'] = lin_train[:,1]
+# test_st_form['lin_form'] = lin_test[:,0]
+# test_st_band['lin_band'] = lin_test[:,1]
+# print("reg form ",rmsle(lin_train[:,0],train_y['formation_energy_ev_natom']))
+# print("reg band ",rmsle(lin_train[:,1],train_y['bandgap_energy_ev']))#
+# visualize_bad_occurance('lin_form','formation_energy_ev_natom',1/3,list_of_columns)
+
+print("LighGBM")
+
+# best_form = {}
+# best_band = {}
+# for i in [x/100. for x in range(60,80,2)]:
+light_train_form,light_test_form = run_estimator(k_enum,runLGBM,train_X, train_y['formation_energy_ev_natom'], test_X,False,True)
+
+# light_train_form_good,light_test_form_good = run_estimator(k_enum,runLGBM,train_X_good, train_y_good['formation_energy_ev_natom'], test_X_good ,False,True)
+    # best_form[rmsle(xgb_train_form, train_y['formation_energy_ev_natom'])]=i
+
+# for i in [x/100. for x in range(40,60,2)]:
+light_train_band,light_test_band = run_estimator(k_enum,runLGBM,train_X, train_y['bandgap_energy_ev'], test_X,False,True)
+
+train_st_form['light_form'] = light_train_form
+train_st_band['light_band'] = light_train_band
+test_st_form['light_form'] = light_test_form
+test_st_band['light_band'] = light_test_band
+print("light_form ",rmsle(light_train_form,train_y['formation_energy_ev_natom']))
+# print("light_form_good ",rmsle(light_train_form_good,train_y_good['formation_energy_ev_natom']))
+print("light_band ",rmsle(light_train_band,train_y['bandgap_energy_ev']))
+# visualize_bad_occurance('light_form','formation_energy_ev_natom',1/3,list_of_columns)
+
+
+
+# plt.scatter(light_train_form,train_y['formation_energy_ev_natom'])
+# plt.xlabel('predict data')
+# plt.ylabel('true data')
+# plt.show()
+#
+#
+# print("XGB")
+#
+# # best_form = {}
+# # best_band = {}
+# # for i in [x/100. for x in range(60,80,2)]:
+# xgb_train_form,xgb_test_form = run_estimator(k_enum,runXGB,train_X, train_y['formation_energy_ev_natom'], test_X,False,True, params_xgb={'eta':1,'subsample':0.74,'colsample_bytree':0.72})
+#     # best_form[rmsle(xgb_train_form, train_y['formation_energy_ev_natom'])]=i
+#
+# # for i in [x/100. for x in range(40,60,2)]:
+# xgb_train_band,xgb_test_band = run_estimator(k_enum,runXGB,train_X, train_y['bandgap_energy_ev'], test_X,False,True,params_xgb={'eta':0.047,'subsample':0.11,'colsample_bytree':0.54})
+#     # best_band[rmsle(xgb_train_band, train_y['bandgap_energy_ev'])] = i
+#
+# #
+# # print("form best {0} for {1} ".format(min(best_form.keys()),best_form[min(best_form.keys())]))
+# # print("band best {0} for {1} ".format(min(best_band.keys()),best_band[min(best_band.keys())]))
+#
+#
+# train_st_form['xgb_form'] = xgb_train_form
+# train_st_band['xgb_band'] = xgb_train_band
+# test_st_form['xgb_form'] = xgb_test_form
+# test_st_band['xgb_band'] = xgb_test_band
+# print("xgb form ",rmsle(xgb_train_form,train_y['formation_energy_ev_natom']))
+# print("xgb band ",rmsle(xgb_train_band,train_y['bandgap_energy_ev']))
+# visualize_bad_occurance('xgb_form','formation_energy_ev_natom',1/3,list_of_columns)
+
+
 
 print("RandomForest")
-r_tree_train,r_tree_test=run_estimator(k_enum,ensemble.RandomForestRegressor(n_estimators=300),train_X, train_y, test_X)
+r_tree_train,r_tree_test=run_estimator(k_enum+1,ensemble.RandomForestRegressor(n_estimators=300,random_state=10),train_X, train_y, test_X)
 
-train_X['r_tree_form'] = r_tree_train[:,0]
-train_X['r_tree_band'] = r_tree_train[:,1]
-test_X['r_tree_form'] = r_tree_test[:,0]
-test_X['r_tree_band'] = r_tree_test[:,1]
+# light_train_form_good,light_test_form_good = run_estimator(k_enum,ensemble.RandomForestRegressor(n_estimators=300,random_state=10),train_X_good, train_y_good, test_X_good)
 
-# print("ExtraTreeRegressor")
-# e_tree_train,e_tree_test  = run_estimator(k_enum,ensemble.ExtraTreesRegressor(n_estimators=500),train_X, train_y, test_X)
+train_st_form['rand_form'] = r_tree_train[:,0]
+train_st_band['rand_band'] = r_tree_train[:,1]
+test_st_form['rand_form'] = r_tree_test[:,0]
+test_st_band['rand_band'] = r_tree_test[:,1]
+print("RandomForest form ",rmsle(r_tree_train[:,0],train_y['formation_energy_ev_natom']))
+# print("RandomForest form_good ",rmsle(light_train_form_good,train_y_good))
+print("RandomForest band ",rmsle(r_tree_train[:,1],train_y['bandgap_energy_ev']))
+# visualize_bad_occurance('rand_form','formation_energy_ev_natom',1/3,list_of_columns)
+# print("RandomForestExtra")
+# r_tree_train2,r_tree_test2=run_estimator(k_enum-1,ensemble.RandomForestRegressor(n_estimators=600,random_state=10),train_X, train_y, test_X)
 #
-# train_X['e_tree_form'] = e_tree_train[:,0]
-# train_X['e_tree_band'] = e_tree_train[:,1]
-# test_X['e_tree_form'] = e_tree_test[:,0]
-# test_X['e_tree_band'] = e_tree_test[:,1]
+# train_st_form['rand_form2'] = r_tree_train2[:,0]
+# train_st_band['rand_band2'] = r_tree_train2[:,1]
+# test_st_form['rand_form2'] = r_tree_test2[:,0]
+# test_st_band['rand_band2'] = r_tree_test2[:,1]
 
+
+
+
+print("ExtraTreeRegressor")
+e_tree_train,e_tree_test  = run_estimator(k_enum,ensemble.ExtraTreesRegressor(n_estimators=500),train_X, train_y, test_X)
+
+train_st_form['e_tree_form'] = e_tree_train[:,0]
+train_st_band['e_tree_band'] = e_tree_train[:,1]
+test_st_form['e_tree_form'] = e_tree_test[:,0]
+test_st_band['e_tree_band'] = e_tree_test[:,1]
+# visualize_bad_occurance('e_tree_form', 'formation_energy_ev_natom', 1 / 3, list_of_columns)
+
+
+light_train_form_new,light_test_form_new = run_estimator(k_enum,runLGBM,train_st_form, train_y['formation_energy_ev_natom'], test_st_form,False,True)
+
+light_train_band_new,light_test_band_new = run_estimator(k_enum,runLGBM,train_st_band, train_y['bandgap_energy_ev'], test_st_band,False,True)
+
+
+print("cat_new form ",rmsle(light_train_form_new,train_y['formation_energy_ev_natom']))
+print("cat_new band ",rmsle(light_train_band_new,train_y['bandgap_energy_ev']))
+
+plt.scatter(light_train_form_new,train_y['formation_energy_ev_natom'])
+plt.xlabel('predict data')
+plt.ylabel('true data')
+plt.show()
+sys.exit()
+# test_out = pd.DataFrame()
+# test_out['id'] = df_test['id']
+# test_out['formation_energy_ev_natom'] = test_st_form.mean(axis=1)
+# test_out['bandgap_energy_ev'] = test_st_band.mean(axis=1)
+#
+# print(test_out[test_out['bandgap_energy_ev']<0]['bandgap_energy_ev'])
+# test_out['formation_energy_ev_natom'] = test_out['formation_energy_ev_natom'].apply(lambda x:abs(x))
+# print(test_out[test_out['formation_energy_ev_natom']<0]['formation_energy_ev_natom'])
+# test_out.to_csv('sub.csv',index=False)
+#
+
+
+
+
+
+print("Lin new Regressor")
+lin_train_form_st,lin_test_form_st  = run_estimator(k_enum,linear_model.LinearRegression(),train_st_form, train_y['formation_energy_ev_natom'], test_st_form,True,True)
+lin_train_band_st,lin_test_band_st  = run_estimator(k_enum,linear_model.LinearRegression(),train_st_band, train_y['bandgap_energy_ev'], test_st_band,True,True)
+print("Lin new Regressor form",rmsle(lin_train_form_st,train_y['formation_energy_ev_natom']))
+print("Lin new Regressor  band ",rmsle(lin_train_band_st,train_y['bandgap_energy_ev']))
+
+
+print("ExtraTreeRegressor")
+e_tree_train_form_st,e_tree_test_form_st  = run_estimator(k_enum,ensemble.ExtraTreesRegressor(n_estimators=300),train_st_form, train_y['formation_energy_ev_natom'], test_st_form,False,True)
+e_tree_train_band_st,e_tree_test_band_st  = run_estimator(k_enum,ensemble.ExtraTreesRegressor(n_estimators=300),train_st_band, train_y['bandgap_energy_ev'], test_st_band,False,True)
+print("ExtraTreeRegressor form ",rmsle(e_tree_train_form_st,train_y['formation_energy_ev_natom']))
+print("ExtraTreeRegressor band ",rmsle(e_tree_train_band_st,train_y['bandgap_energy_ev']))
+
+
+print("XGB_new")
+xgb_train_form_st,xgb_test_form_st = run_estimator(k_enum,runXGB,train_st_form, train_y['formation_energy_ev_natom'], test_st_form,False,True,params_xgb={'eta':0.008,'subsample':0.74,'colsample_bytree':0.72})
+xgb_train_band_st,xgb_test_band_st = run_estimator(k_enum,runXGB,train_st_band, train_y['bandgap_energy_ev'], test_st_band,False,True,params_xgb={'eta':0.047,'subsample':0.11,'colsample_bytree':0.54})
+print("XGB_new form ",rmsle(xgb_train_form_st,train_y['formation_energy_ev_natom']))
+print("XGB_new band ",rmsle(xgb_train_band_st,train_y['bandgap_energy_ev']))
+
+
+print("NuSVU new")
+NuSVU_train_form_st,NuSVU_test_form_st = run_estimator(k_enum,svm.NuSVR(C=120),train_st_form, train_y['formation_energy_ev_natom'], test_st_form,False,True)
+NuSVU_train_band_st,NuSVU_test_band_st = run_estimator(k_enum,svm.NuSVR(C=0.5),train_st_band, train_y['bandgap_energy_ev'], test_st_band,False,True)
+print("NuSVU new form ",rmsle(NuSVU_train_form_st,train_y['formation_energy_ev_natom']))
+print("NuSVU new band ",rmsle(NuSVU_train_band_st,train_y['bandgap_energy_ev']))
+
+
+print("Gradient boosting")
+Grad_train_form_st,Grad_test_form_st = run_estimator(k_enum,ensemble.GradientBoostingRegressor(n_estimators=1000,learning_rate=0.05),train_st_form, train_y['formation_energy_ev_natom'], test_st_form,False,True)
+Grad_train_band_st,Grad_test_band_st = run_estimator(k_enum,ensemble.GradientBoostingRegressor(n_estimators=1000,learning_rate=0.03),train_st_band, train_y['bandgap_energy_ev'], test_st_band,False,True)
+print("Gradient form ",rmsle(Grad_train_form_st,train_y['formation_energy_ev_natom']))
+print("Gradient band ",rmsle(Grad_train_band_st,train_y['bandgap_energy_ev']))
+
+
+#print(xgb_test_form,xgb_test_band)
 
 # print("ExtraTreeRegressor")
 # f_tree_train,f_tree_test  = run_estimator(k_enum,ensemble.ExtraTreesRegressor(n_estimators=200),train_X, train_y, test_X, test_y=None, test_X2=None)
 
-test_out = pd.DataFrame()
-test_out['id'] = df_test['id']
-test_out['formation_energy_ev_natom'] = train_X['xgb_form']
-test_out['bandgap_energy_ev'] = test_X['r_tree_band']
-
-print(test_out[test_out['bandgap_energy_ev']<0]['bandgap_energy_ev'])
-#test_out['formation_energy_ev_natom'] = test_out['formation_energy_ev_natom'].apply(lambda x:abs(x))
-print(test_out[test_out['formation_energy_ev_natom']<0]['formation_energy_ev_natom'])
-test_out.to_csv('sub.csv',index=False)
+# test_out = pd.DataFrame()
+# test_out['id'] = df_test['id']
+# test_out['formation_energy_ev_natom'] = cat_form_test3
+# test_out['bandgap_energy_ev'] = xgb_test_band
+#
+# print(test_out[test_out['bandgap_energy_ev']<0]['bandgap_energy_ev'])
+# test_out['formation_energy_ev_natom'] = test_out['formation_energy_ev_natom'].apply(lambda x:abs(x))
+# print(test_out[test_out['formation_energy_ev_natom']<0]['formation_energy_ev_natom'])
+# test_out.to_csv('sub.csv',index=False)
 #
 # print("LinRegressor")
 # run_estimator(k_enum,linear_model.LinearRegression(),train_X, train_y, test_X, test_y=None, test_X2=None)
