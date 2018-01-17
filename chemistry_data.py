@@ -139,8 +139,69 @@ def get_lattice_constants(lattice_vectors):
     lat_const_series["lattice_angle_gamma_degree"] = angle_deg_between(lattice_vectors[0],lattice_vectors[1])
     return lat_const_series
 
-print(get_lattice_constants(train_lat))
 
+def get_shortest_distances(reduced_coords):
+    natom = len(reduced_coords)
+    dist = np.zeros(natom*natom/2)
+    for i in range(natom):
+        for j in range(i):
+            yield  length(np.subtract(reduced_coords[i],reduced_coords[natom-1-j]))
+
+
+df_train["train_xyz"] = df_train['id'].apply(lambda x: get_xyz_data("input/train/{}/geometry.xyz".format(x))[0])
+df_train["train_lat"] = df_train['id'].apply(lambda x: get_xyz_data("input/train/{}/geometry.xyz".format(x))[1])
+df_train["count_O"] = df_train['train_xyz'].apply(lambda x: len([i[-1] for i in x if i[-1]=='O']))
+df_train['count_met'] = df_train['train_xyz'].apply(lambda x: len([i[-1] for i in x if i[-1] !='O']))
+
+df_test["train_xyz"] = df_test['id'].apply(lambda x: get_xyz_data("input/test/test/{}/geometry.xyz".format(x))[0])
+df_test["train_lat"] = df_test['id'].apply(lambda x: get_xyz_data("input/test/test/{}/geometry.xyz".format(x))[1])
+df_test["count_O"] = df_test['train_xyz'].apply(lambda x: len([i[-1] for i in x if i[-1]=='O']))
+df_test['count_met'] = df_test['train_xyz'].apply(lambda x: len([i[-1] for i in x if i[-1] !='O']))
+
+min_atoms = 4
+
+for i in range(min_atoms):
+    df_train["positional_vector_"+str(i)] = df_train['train_xyz'].apply(lambda x:x[i][0])
+    df_test["positional_vector_"+str(i)] = df_test['train_xyz'].apply(lambda x:x[i][0])
+
+for i in range(min_atoms):
+    for j in range(3):
+        df_train["positional_vector_"+str(i)+"_"+str(j)] = df_train["positional_vector_"+str(i)].apply(lambda x: x[j])
+        df_test["positional_vector_" + str(i)+"_"+str(j)] = df_test["positional_vector_"+str(i)].apply(lambda x: x[j])
+
+
+
+# df_train["volume"] = df_train['train_lat'].apply(lambda x:np.linalg.det(np.transpose(x)))
+# df_test["volume"] = df_test['train_lat'].apply(lambda x:np.linalg.det(np.transpose(x)))
+#
+# df_train["den_met"] = df_train.apply(lambda row: row['count_met']/row['volume'],axis=1)
+# df_test["den_met"] = df_test.apply(lambda row: row['count_met']/row['volume'],axis=1)
+
+df_train["reciprocal_lattice_vectors"] = df_train['train_lat'].apply(lambda x:np.linalg.inv(np.transpose(x)))
+df_test["reciprocal_lattice_vectors"] = df_test['train_lat'].apply(lambda x:np.linalg.inv(np.transpose(x)))
+
+# get all reduced vectors
+# df_train['all_red_vectors'] = df_train.apply(lambda row:[[np.matmul(row['reciprocal_lattice_vectors'], R)] for (R, _) in row['train_xyz']],axis=1)
+# df_train['rad_vectors'] = df_train['all_red_vectors'].apply(lambda x: list(get_shortest_distances(x)))
+# df_train['mean_rad_vectors'] = df_train['rad_vectors'].apply(lambda x: np.mean(x))
+# df_train['min_rad_vectors'] = df_train['rad_vectors'].apply(lambda x: min(x))
+
+# df_test['all_red_vectors'] = df_test.apply(lambda row:[[np.matmul(row['reciprocal_lattice_vectors'], R)] for (R, _) in row['train_xyz']],axis=1)
+# df_test['rad_vectors'] = df_test['all_red_vectors'].apply(lambda x: list(get_shortest_distances(x)))
+# df_test['mean_rad_vectors'] = df_test['rad_vectors'].apply(lambda x: np.mean(x))
+# df_test['min_rad_vectors'] = df_test['rad_vectors'].apply(lambda x: min(x))
+
+for i in range(min_atoms):
+    for j in range(3):
+        df_train["reduced_coordinate_vector_"+str(i)+"_"+str(j)] = df_train.apply(lambda row: np.matmul(row['reciprocal_lattice_vectors'],row['positional_vector_'+str(i)])[j],axis=1)
+        df_test["reduced_coordinate_vector_" + str(i)+"_"+str(j)] = df_test.apply(lambda row: np.matmul(row['reciprocal_lattice_vectors'], row['positional_vector_'+str(i)])[j], axis=1)
+
+for i in range(min_atoms):
+    del df_train["positional_vector_"+str(i)],df_test["positional_vector_"+str(i)]
+
+del df_test["train_xyz"],df_train["train_xyz"],df_test["train_lat"],df_train["train_lat"]
+del df_train["reciprocal_lattice_vectors"],df_test['reciprocal_lattice_vectors']
+# del df_train['all_red_vectors'],df_test['all_red_vectors'],df_train['rad_vectors'],df_test['rad_vectors']
 
 
 def run_model(model,train_X, train_y, test_X, test_y, test_X2, polyn):
@@ -372,16 +433,16 @@ list_of_columns = ['spacegroup',
 
 # visualize_bad_occurance('cat_form2','formation_energy_ev_natom',1/3,list_of_columns)
 
-print("nuSVR")
-nus_form_train3,nus_form_test3 = run_estimator(k_enum,svm.NuSVR(C=3),train_X, train_y['formation_energy_ev_natom'], test_X,False,True)
-nus_band_train3,nus_band_test3 = run_estimator(k_enum,svm.NuSVR(C=100),train_X, train_y['bandgap_energy_ev'], test_X,False,True)
-
-train_st_form['nuSVR_form2'] = nus_form_train3
-train_st_band['nuSVR_band2'] = nus_band_train3
-test_st_form['nuSVR_form2'] = nus_form_test3
-test_st_band['nuSVR_band2'] = nus_band_test3
-print("nuSVR form ",rmsle(nus_form_train3,train_y['formation_energy_ev_natom']))
-print("nuSVR band ",rmsle(nus_band_train3,train_y['bandgap_energy_ev']))
+# print("nuSVR")
+# nus_form_train3,nus_form_test3 = run_estimator(k_enum,svm.NuSVR(C=3),train_X, train_y['formation_energy_ev_natom'], test_X,False,True)
+# nus_band_train3,nus_band_test3 = run_estimator(k_enum,svm.NuSVR(C=100),train_X, train_y['bandgap_energy_ev'], test_X,False,True)
+#
+# train_st_form['nuSVR_form2'] = nus_form_train3
+# train_st_band['nuSVR_band2'] = nus_band_train3
+# test_st_form['nuSVR_form2'] = nus_form_test3
+# test_st_band['nuSVR_band2'] = nus_band_test3
+# print("nuSVR form ",rmsle(nus_form_train3,train_y['formation_energy_ev_natom']))
+# print("nuSVR band ",rmsle(nus_band_train3,train_y['bandgap_energy_ev']))
 
 # visualize_bad_occurance('nuSVR_form2','formation_energy_ev_natom',1/3,list_of_columns)
 
@@ -422,7 +483,7 @@ print("LighGBM")
 # best_form = {}
 # best_band = {}
 # for i in [x/100. for x in range(60,80,2)]:
-light_train_form,light_test_form = run_estimator(k_enum,runLGBM,train_X, train_y['formation_energy_ev_natom'], test_X,False,True)
+light_train_form,light_test_form = run_estimator(k_enum,runLGBM,train_X.drop(["count_O","count_met"],axis=1), train_y['formation_energy_ev_natom'], test_X.drop(["count_O","count_met"],axis=1),False,True)
 
 # light_train_form_good,light_test_form_good = run_estimator(k_enum,runLGBM,train_X_good, train_y_good['formation_energy_ev_natom'], test_X_good ,False,True)
     # best_form[rmsle(xgb_train_form, train_y['formation_energy_ev_natom'])]=i
@@ -439,12 +500,16 @@ print("light_form ",rmsle(light_train_form,train_y['formation_energy_ev_natom'])
 print("light_band ",rmsle(light_train_band,train_y['bandgap_energy_ev']))
 # visualize_bad_occurance('light_form','formation_energy_ev_natom',1/3,list_of_columns)
 
+test_out = pd.DataFrame()
+test_out['id'] = df_test['id']
+test_out['formation_energy_ev_natom'] = light_test_form
+test_out['bandgap_energy_ev'] = light_test_band
 
-
-# plt.scatter(light_train_form,train_y['formation_energy_ev_natom'])
-# plt.xlabel('predict data')
-# plt.ylabel('true data')
-# plt.show()
+print(test_out[test_out['bandgap_energy_ev']<0]['bandgap_energy_ev'])
+test_out['formation_energy_ev_natom'] = test_out['formation_energy_ev_natom'].apply(lambda x:abs(x))
+print(test_out[test_out['formation_energy_ev_natom']<0]['formation_energy_ev_natom'])
+test_out.to_csv('sub.csv',index=False)
+sys.exit()
 #
 #
 # print("XGB")
@@ -508,18 +573,18 @@ test_st_band['e_tree_band'] = e_tree_test[:,1]
 # visualize_bad_occurance('e_tree_form', 'formation_energy_ev_natom', 1 / 3, list_of_columns)
 
 
-light_train_form_new,light_test_form_new = run_estimator(k_enum,runLGBM,train_st_form, train_y['formation_energy_ev_natom'], test_st_form,False,True)
-
-light_train_band_new,light_test_band_new = run_estimator(k_enum,runLGBM,train_st_band, train_y['bandgap_energy_ev'], test_st_band,False,True)
-
-
-print("cat_new form ",rmsle(light_train_form_new,train_y['formation_energy_ev_natom']))
-print("cat_new band ",rmsle(light_train_band_new,train_y['bandgap_energy_ev']))
-
-plt.scatter(light_train_form_new,train_y['formation_energy_ev_natom'])
-plt.xlabel('predict data')
-plt.ylabel('true data')
-plt.show()
+# light_train_form_new,light_test_form_new = run_estimator(k_enum,runLGBM,train_st_form, train_y['formation_energy_ev_natom'], test_st_form,False,True)
+#
+# light_train_band_new,light_test_band_new = run_estimator(k_enum,runLGBM,train_st_band, train_y['bandgap_energy_ev'], test_st_band,False,True)
+#
+#
+# print("light_new form ",rmsle(light_train_form_new,train_y['formation_energy_ev_natom']))
+# print("light_new band ",rmsle(light_train_band_new,train_y['bandgap_energy_ev']))
+#
+# plt.scatter(light_train_form_new,train_y['formation_energy_ev_natom'])
+# plt.xlabel('predict data')
+# plt.ylabel('true data')
+# plt.show()
 sys.exit()
 # test_out = pd.DataFrame()
 # test_out['id'] = df_test['id']
