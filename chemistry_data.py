@@ -279,7 +279,7 @@ def runXGB(train_X, train_y, test_X, test_y=None, test_X2=None, seed_val=23, chi
         pred_test = pred_test_y2
     return pred_train, pred_test, model
 
-def runLGBM(train_X, train_y, test_X, test_y=None, test_X2=None, seed_val=23, child=3, feature_fraction = 0.6):
+def runLGBM(train_X, train_y, test_X, test_y=None, test_X2=None, seed_val=23, child=3, params_lgbm={}):
     RS = 20170501
     np.random.seed(RS)
 
@@ -302,17 +302,11 @@ def runLGBM(train_X, train_y, test_X, test_y=None, test_X2=None, seed_val=23, ch
         'num_rounds': ROUNDS
     }
 
+
+    params[list(params_lgbm.items())[0][0]] = list(params_lgbm.items())[0][1]
+    print(params)
     train_lgb = lgbm.Dataset(train_X, train_y,free_raw_data=False)
 
-    def reset_metrics():
-        def callback(env):
-            lgb_eval_new = lgbm.Dataset(train_X, train_y, reference=train_lgb)
-            # env.model.
-
-        callback.before_iteration = True
-        callback.order = 0
-
-        return callback
 
      # learning_rates = lambda iter: 0.085 * (0.99 ** iter)
     test_lgbm = test_X
@@ -353,7 +347,7 @@ def run_estimator(k_enum,run_for_model,train_X, train_y, test_X, pol=False,singl
             pred_val_y, pred_test_y, model1= runXGB(dev_X, dev_y, val_X, val_y, test_X, seed_val=0,params=params_xgb)
         elif run_for_model==runLGBM:
             print("runLGBM")
-            pred_val_y, pred_test_y, model1 = runLGBM(dev_X, dev_y, val_X, val_y, test_X, seed_val=0, feature_fraction=params_xgb)
+            pred_val_y, pred_test_y, model1 = runLGBM(dev_X, dev_y, val_X, val_y, test_X, seed_val=0, params_lgbm=params_xgb)
         else:
             pred_val_y, pred_test_y, model = run_model(run_for_model,dev_X, dev_y, val_X, val_y, test_X,pol)
         pred_full_test = pred_full_test + pred_test_y
@@ -519,13 +513,13 @@ print("LighGBM")
 # best_form = {}
 # best_band = {}
 # for i in [x/100. for x in range(60,80,2)]:
-light_train_form,light_test_form = run_estimator(k_enum-1,runLGBM,train_X.drop(["count_O","count_met"],axis=1), train_y['formation_energy_ev_natom'], test_X.drop(["count_O","count_met"],axis=1),False,True,params_xgb=0.7)
+light_train_form,light_test_form = run_estimator(k_enum-1,runLGBM,train_X, train_y['formation_energy_ev_natom'], test_X,False,True,params_xgb={'feature_fraction': 0.3})
 
 # light_train_form_good,light_test_form_good = run_estimator(k_enum,runLGBM,train_X_good, train_y_good['formation_energy_ev_natom'], test_X_good ,False,True)
     # best_form[rmsle(xgb_train_form, train_y['formation_energy_ev_natom'])]=i
 
 # for i in [x/100. for x in range(40,60,2)]:
-light_train_band,light_test_band = run_estimator(k_enum-1,runLGBM,train_X, train_y['bandgap_energy_ev'], test_X,False,True,params_xgb=0.6)
+light_train_band,light_test_band = run_estimator(k_enum-1,runLGBM,train_X, train_y['bandgap_energy_ev'], test_X,False,True,params_xgb={'feature_fraction': 0.6})
 
 train_st_form['light_form'] = light_train_form
 train_st_band['light_band'] = light_train_band
@@ -554,8 +548,8 @@ print("light_band ",rmsle(light_train_band,train_y['bandgap_energy_ev']))
 
 test_out = pd.DataFrame()
 test_out['id'] = df_test['id']
-test_out['formation_energy_ev_natom'] = cat_form_test3
-test_out['bandgap_energy_ev'] = light_test_band
+test_out['formation_energy_ev_natom'] = (light_test_form + cat_form_test3)/2
+test_out['bandgap_energy_ev'] = (light_test_band + cat_band_test3)/2
 
 print(test_out[test_out['bandgap_energy_ev']<0]['bandgap_energy_ev'])
 test_out['formation_energy_ev_natom'] = test_out['formation_energy_ev_natom'].apply(lambda x:abs(x))
